@@ -6,6 +6,8 @@ sentence-transformers==3.0.1
 torch==2.4.0
 transformers==4.44.2
 chromadb==0.5.5
-# duckduckgo-search==6.2.2
 pandas==2.2.2
-streamlit==1.37.1
+streamlit>=1.42.0
+pypinyin==0.51.0
+requests==2.32.3
+beautifulsoup4==4.12.3
