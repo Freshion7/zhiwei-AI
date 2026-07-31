@@ -1,0 +1,11 @@
+bcrypt==4.2.0
+python-docx==1.1.2
+openpyxl==3.1.5
+graphviz==0.20.3
+sentence-transformers==3.0.1
+torch==2.4.0
+transformers==4.44.2
+chromadb==0.5.5
+# duckduckgo-search==6.2.2
+pandas==2.2.2
+streamlit==1.37.1
