@@ -7,7 +7,7 @@ torch==2.4.0
 transformers==4.44.2
 chromadb==0.5.5
 pandas==2.2.2
-streamlit>=1.42.0
+streamlit==1.60.0
 pypinyin==0.51.0
 requests==2.32.3
 beautifulsoup4==4.12.3
