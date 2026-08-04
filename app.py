@@ -478,93 +478,207 @@ def main_app():
                                     st.rerun()
 
     # ---------- 原子笔记（彻底解决 DOM 崩溃问题） ----------
+    # ---------- 原子笔记（白板 + 图文序列） ----------
     elif menu == "📒 原子笔记":
-        st.subheader("📒 原子笔记（知识库 + 流程图工具）")
-        st.caption("默认直接展示代码，点击下方按钮可安全预览流程图，完美解决页面崩溃问题。")
+        import json
+
+        st.subheader("📒 原子笔记（内置自由白板与图文序列）")
         
-        with st.expander("✏️ 新建笔记 / 制作流程图", expanded=True):
-            with st.form("atom_note"):
-                a_title = st.text_input("笔记标题")
-                a_content = st.text_area("内容 (支持 Markdown、代码块、Mermaid流程图)", height=200)
-                a_code_snippet = st.text_area("进阶：流程图源码 (直接粘贴 Mermaid 代码，或者描述逻辑生成)", height=100, placeholder="例: graph TD; A[开始] --> B{判断}; B -->|是| C[结束];")
+        # 分页模式：文字笔记 vs 白板画布
+        note_mode = st.radio("选择当前编辑模式", ["📝 图文笔记", "🖌️ 自由白板（拖拽/拉线/嵌入图片）"], horizontal=True)
+
+        if note_mode == "📝 图文笔记":
+            # 标准的文本笔记逻辑
+            if "atom_content_prompt" not in st.session_state:
+                st.session_state.atom_content_prompt = ""
                 
-                a_files = st.file_uploader("上传图片/音频/其他文件", accept_multiple_files=True)
-                submitted = st.form_submit_button("保存笔记")
+            with st.expander("✏️ 快速记录图文", expanded=True):
+                col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
+                if col_btn1.button("🔲 待办", key="todo_btn"):
+                    st.session_state.atom_content_prompt += "\n- [ ] 待办事项"
+                if col_btn2.button("**B** 粗体", key="bold_btn"):
+                    st.session_state.atom_content_prompt += "**加粗**"
+                if col_btn3.button("*I* 斜体", key="italic_btn"):
+                    st.session_state.atom_content_prompt += "*斜体*"
+                if col_btn4.button("📝 标题", key="header_btn"):
+                    st.session_state.atom_content_prompt += "\n### 新章节"
                 
-                if submitted and a_title:
-                    file_paths = []
-                    if a_files:
-                        atom_dir = os.path.join(user_storage, "atom_notes_files")
-                        for file in a_files:
-                            save_path = os.path.join(atom_dir, file.name)
-                            with open(save_path, "wb") as f:
-                                f.write(file.getbuffer())
-                            file_paths.append(save_path)
-                    file_paths_str = ",".join(file_paths)
+                with st.form("atom_note_text"):
+                    a_title = st.text_input("笔记标题")
+                    c1_img, c2_img = st.columns(2)
+                    with c1_img:
+                        upload_img = st.file_uploader("📁 上传图片", type=['png','jpg','jpeg','gif'], key="atom_img_upload")
+                    with c2_img:
+                        camera_img = st.camera_input("📱 调用摄像头拍照", key="atom_camera_img")
                     
-                    conn = get_db_connection()
-                    c = conn.cursor()
-                    c.execute("INSERT INTO atom_notes (user_id, title, content, file_paths, code_content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                              (user['id'], a_title, a_content, file_paths_str, a_code_snippet, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-                    conn.commit()
-                    conn.close()
-                    st.success("✅ 原子笔记已保存！")
-                    st.rerun()
-        
+                    a_content = st.text_area("📝 编辑内容", value=st.session_state.atom_content_prompt, height=150)
+                    a_files = st.file_uploader("📎 上传附件", accept_multiple_files=True, key="atom_other_files")
+                    submitted = st.form_submit_button("💾 保存笔记")
+                    
+                    if submitted and a_title:
+                        file_paths, img_paths_str = [], ""
+                        atom_dir = os.path.join(user_storage, "atom_notes_files")
+                        if upload_img:
+                            save_path = os.path.join(atom_dir, upload_img.name)
+                            with open(save_path, "wb") as f: f.write(upload_img.getbuffer())
+                            file_paths.append(save_path)
+                            img_paths_str += f"\n![{upload_img.name}]({save_path})\n"
+                        if camera_img:
+                            cam_fname = f"camera_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+                            save_path = os.path.join(atom_dir, cam_fname)
+                            with open(save_path, "wb") as f: f.write(camera_img.getbuffer())
+                            file_paths.append(save_path)
+                            img_paths_str += f"\n![{cam_fname}]({save_path})\n"
+                        if a_files:
+                            for file in a_files:
+                                save_path = os.path.join(atom_dir, file.name)
+                                with open(save_path, "wb") as f: f.write(file.getbuffer())
+                                file_paths.append(save_path)
+                        file_paths_str = ",".join(file_paths)
+                        final_content = f"{img_paths_str}\n\n{a_content}"
+                        
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        c.execute("INSERT INTO atom_notes (user_id, title, content, file_paths, code_content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                  (user['id'], a_title, final_content, file_paths_str, "", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                        conn.commit()
+                        conn.close()
+                        st.success("✅ 图文笔记已保存！")
+                        st.rerun()
+
+        # ✅ 修复点：这里的 elif 与上面的 if 对齐，并删除了旧的 excalidraw 依赖
+        # 修正：elif 必须与 if 完全对齐（兄弟层级）
+        elif note_mode == "🖌️ 自由白板（拖拽/拉线/嵌入图片）":
+            st.caption("💡 绘图指南：左侧工具栏挑选形状、连线。将图片直接拖入形状中可完美适配！支持无限伸缩画布。")
+            
+            # 获取当前 Session 中的白板数据（用于恢复状态）
+            current_wb_json = st.session_state.get("current_wb_json", "{}")
+
+            # 优化：更换为 unpkg CDN 源，并实现实时双向通讯
+            html_code = f"""
+            <div id="excalidraw-container" style="height: 500px; width: 100%; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;"></div>
+            <script src="https://unpkg.com/@excalidraw/excalidraw@0.17.0/dist/excalidraw.min.js"></script>
+            <script>
+                (function() {{
+                    const waitForExcalidraw = setInterval(() => {{
+                        if (window.Excalidraw) {{
+                            clearInterval(waitForExcalidraw);
+                            const container = document.getElementById('excalidraw-container');
+                            let initialData = null;
+                            try {{
+                                initialData = {current_wb_json};
+                            }} catch (e) {{ initialData = {{}}; }}
+                            
+                            const app = window.Excalidraw.default;
+                            const excalibur = app(container, {{
+                                initialData: initialData,
+                                theme: "light",
+                                viewBackgroundColor: "#ffffff"
+                            }});
+                            
+                            excalibur.on('change', function(data) {{
+                                const jsonStr = JSON.stringify({{ elements: data.elements, appState: data.appState, files: data.files }});
+                                window.parent.postMessage({{
+                                    type: 'streamlit:setComponentValue',
+                                    value: jsonStr
+                                }}, '*');
+                            }});
+                        }}
+                    }}, 200);
+                }})();
+            </script>
+            """
+            
+            # 渲染白板组件
+            excalidraw_result = st.components.v1.html(html_code, height=550)
+            
+            # 数据变动同步到 session_state
+            if excalidraw_result:
+                st.session_state["current_wb_json"] = excalidraw_result
+
+            # 保存逻辑
+            with st.form("atom_note_whiteboard"):
+                a_title = st.text_input("白板笔记标题")
+                submitted_wb = st.form_submit_button("💾 保存当前白板状态")
+                
+                if submitted_wb and a_title:
+                    data_to_save = st.session_state.get("current_wb_json")
+                    if data_to_save and data_to_save != "{}":
+                        conn = get_db_connection()
+                        c = conn.cursor()
+                        c.execute("INSERT INTO atom_notes (user_id, title, content, file_paths, code_content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                                  (user['id'], a_title, "[自由白板]", "", data_to_save, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                        conn.commit()
+                        conn.close()
+                        st.success("✅ 白板已成功保存！")
+                        st.session_state["current_wb_json"] = "{}"
+                        st.rerun()
+                    else:
+                        st.error("当前白板为空或未检测到绘图内容，请先拖拽几个形状到画布上再试！")
+
+        # ---------- 统一展示已保存的笔记 ----------
+        st.divider()
+        st.write("📚 **已保存的原子笔记列表**")
         conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT id, title, content, file_paths, code_content, created_at FROM atom_notes WHERE user_id = ? ORDER BY created_at DESC", (user['id'],))
         atom_notes = c.fetchall()
         conn.close()
 
-        # 修正了此处代码的缩进问题，彻底解决了 IndentationError
         if not atom_notes:
-            st.info("知识库是空的，写一条原子笔记吧！")
+            st.info("暂无笔记，请在上方新建。")
         else:
             for note in atom_notes:
                 with st.container(border=True):
                     st.markdown(f"### {note[1]}") 
-                    st.caption(f"📅 创建时间: {note[5]}")
+                    st.caption(f"📅 {note[5]}")
+                    if st.button("查看详情", key=f"view_{note[0]}"):
+                        st.session_state[f"detail_{note[0]}"] = True
                     
-                    # 使用 st.write 避免基础冲突
-                    st.write(note[2])
-                    
-                    # === 核心修改：零风险展示流程图 ===
-                    if note[4]:
-                        st.write("🔄 **流程图源码：**")
-                        st.code(note[4], language="mermaid")
-                        
-                        # 使用按钮动态触发流程图渲染，完美隔离 DOM 冲突
-                        if st.button(f"📊 点击渲染/预览此流程图", key=f"render_mermaid_{note[0]}"):
+                    if st.session_state.get(f"detail_{note[0]}"):
+                        if note[4] and note[4] != "":
                             try:
-                                mermaid_html = f"""
-                                <div style="background: white; padding: 10px; border-radius: 5px; margin-top: 10px;">
-                                    <pre class="mermaid" style="text-align: center;">
-                                        {note[4]}
-                                    </pre>
-                                    <script type="module">
-                                        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
-                                        mermaid.initialize({{ startOnLoad: true, theme: 'default' }});
-                                    </script>
-                                </div>
+                                # 如果是保存的白板JSON，则直接渲染 Excalidraw 白板
+                                whiteboard_json = json.loads(note[4])
+                                # 渲染白板组件（同样基于原生 HTML）
+                                render_html = f"""
+                                <div id="excalidraw-view-container" style="height: 400px; width: 100%; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;"></div>
+                                <script src="https://cdn.jsdelivr.net/npm/@excalidraw/excalidraw@0.17.0/dist/excalidraw.min.js"></script>
+                                <script>
+                                    window.onload = function() {{
+                                        const container = document.getElementById('excalidraw-view-container');
+                                        const app = window.Excalidraw.default;
+                                        const excalibur = app(container, {{
+                                            initialData: {json.dumps(whiteboard_json)},
+                                            theme: "light",
+                                            viewBackgroundColor: "#ffffff"
+                                        }});
+                                    }};
+                                </script>
                                 """
-                                st.components.v1.html(mermaid_html, height=400)
+                                st.components.v1.html(render_html, height=450)
                             except Exception as e:
-                                st.warning("前端加载流程图组件时发生隔离错误，请刷新重试。")
-                    
-                    if note[3]:
-                        st.write("📎 **附件：**")
-                        for path in note[3].split(","):
-                            if path and os.path.exists(path):
-                                ext = os.path.splitext(path)[1].lower()
-                                fname = os.path.basename(path)
-                                if ext in ['.png', '.jpg', '.jpeg', '.gif']:
-                                    st.image(path, caption=fname, use_container_width=True)
-                                elif ext in ['.mp3', '.wav', '.ogg']:
-                                    st.audio(path)
-                                else:
-                                    with open(path, "rb") as f:
-                                        st.download_button(label=f"📥 下载 {fname}", data=f, file_name=fname, key=f"atom_{note[0]}_{fname}")
+                                st.warning(f"白板数据解析错误，请确认笔记内容：{e}")
+                        else:
+                            # 普通图文笔记
+                            st.markdown(note[2])
+
+                        if note[3]:
+                            st.write("📎 **附件：**")
+                            for path in note[3].split(","):
+                                if path and os.path.exists(path):
+                                    ext = os.path.splitext(path)[1].lower()
+                                    fname = os.path.basename(path)
+                                    if ext in ['.png','.jpg','.jpeg','.gif']:
+                                        st.image(path, caption=fname, use_container_width=True)
+                                    elif ext in ['.mp3','.wav','.ogg']:
+                                        st.audio(path)
+                                    else:
+                                        with open(path, "rb") as f:
+                                            st.download_button(label=f"📥 下载 {fname}", data=f, file_name=fname, key=f"atom_{note[0]}_{fname}")
+                        if st.button(f"收起详情", key=f"close_{note[0]}"):
+                            st.session_state[f"detail_{note[0]}"] = False
+                            st.rerun()
 
     # ---------- 个人中心 ----------
     elif menu == "⚙️ 个人中心":
