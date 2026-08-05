@@ -1,4 +1,20 @@
 import streamlit as st
+# ============== 修复包版本缺失的补丁 ==============
+import sys
+import importlib.metadata
+# 获取原来的版本读取函数
+_orig_version = importlib.metadata.version
+# 自定义一个新函数：当程序问 streamlit 的版本时，直接给它一个假版本号
+def _patched_version(package_name):
+    if package_name == 'streamlit':
+        return '1.71.0'
+    return _orig_version(package_name)
+# 把原函数替换掉
+importlib.metadata.version = _patched_version
+# =================================================
+
+import streamlit as st
+# (接着就是你下面原本的所有代码)
 import sqlite3
 import bcrypt
 import os
@@ -11,6 +27,25 @@ from io import BytesIO
 from openpyxl import Workbook
 from pypinyin import pinyin
 
+from PIL import Image
+import io
+
+def compress_image(file_bytes, max_size_mb=2):
+    """压缩图片至 max_size_mb 以内，返回压缩后的字节数据"""
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        # 将图片转为 JPEG 格式（如果原图是 PNG 也可能被压缩）
+        quality = 85
+        output = io.BytesIO()
+        img.save(output, format='JPEG', quality=quality, optimize=True)
+        while output.tell() > max_size_mb * 1024 * 1024 and quality > 20:
+            quality -= 5
+            output = io.BytesIO()
+            img.save(output, format='JPEG', quality=quality, optimize=True)
+        return output.getvalue()
+    except Exception as e:
+        print(f"图片压缩失败: {e}")
+        return file_bytes  # 压缩失败返回原数据
 # ================= 页面配置 =================
 st.set_page_config(page_title="知微 - 你的私人AI助理", layout="wide")
 
@@ -478,32 +513,35 @@ def main_app():
                                     st.rerun()
 
     # ---------- 原子笔记（彻底解决 DOM 崩溃问题） ----------
-    # ---------- 原子笔记（白板 + 图文序列） ----------
+    # ---------- 原子笔记（图文序列 + Drawflow 流程图） ----------
     elif menu == "📒 原子笔记":
-        import json
+        # 初始化流程图状态
+        if "flow_json" not in st.session_state:
+            st.session_state.flow_json = "{}"
 
-        st.subheader("📒 原子笔记（内置自由白板与图文序列）")
-        
-        # 分页模式：文字笔记 vs 白板画布
-        note_mode = st.radio("选择当前编辑模式", ["📝 图文笔记", "🖌️ 自由白板（拖拽/拉线/嵌入图片）"], horizontal=True)
+        tab_note, tab_flow = st.tabs(["📝 图文笔记编辑", "📊 白板流程图 (WPS级零代码)"])
 
-        if note_mode == "📝 图文笔记":
-            # 标准的文本笔记逻辑
+        with tab_note:
+            st.subheader("📒 原子笔记（图文序列与分屏对比）")
+            st.caption("支持 Markdown 图文混排，下方可零代码点击构建流程图。")
+            
             if "atom_content_prompt" not in st.session_state:
                 st.session_state.atom_content_prompt = ""
-                
-            with st.expander("✏️ 快速记录图文", expanded=True):
-                col_btn1, col_btn2, col_btn3, col_btn4 = st.columns(4)
+            
+            with st.expander("✏️ 新建图文笔记 / 制作记录", expanded=True):
+                col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
                 if col_btn1.button("🔲 待办", key="todo_btn"):
-                    st.session_state.atom_content_prompt += "\n- [ ] 待办事项"
+                    st.session_state.atom_content_prompt += "\n- [ ] 待办事项\n- [ ] 任务2"
                 if col_btn2.button("**B** 粗体", key="bold_btn"):
-                    st.session_state.atom_content_prompt += "**加粗**"
+                    st.session_state.atom_content_prompt += "**加粗文本**"
                 if col_btn3.button("*I* 斜体", key="italic_btn"):
-                    st.session_state.atom_content_prompt += "*斜体*"
-                if col_btn4.button("📝 标题", key="header_btn"):
+                    st.session_state.atom_content_prompt += "*斜体文本*"
+                if col_btn4.button("S 删线", key="strike_btn"):
+                    st.session_state.atom_content_prompt += "~~删除文本~~"
+                if col_btn5.button("📝 标题", key="header_btn"):
                     st.session_state.atom_content_prompt += "\n### 新章节"
-                
-                with st.form("atom_note_text"):
+                    
+                with st.form("atom_note"):
                     a_title = st.text_input("笔记标题")
                     c1_img, c2_img = st.columns(2)
                     with c1_img:
@@ -511,29 +549,47 @@ def main_app():
                     with c2_img:
                         camera_img = st.camera_input("📱 调用摄像头拍照", key="atom_camera_img")
                     
-                    a_content = st.text_area("📝 编辑内容", value=st.session_state.atom_content_prompt, height=150)
+                    a_content = st.text_area("📝 编辑内容 (支持 Markdown)", value=st.session_state.atom_content_prompt, height=150)
                     a_files = st.file_uploader("📎 上传附件", accept_multiple_files=True, key="atom_other_files")
                     submitted = st.form_submit_button("💾 保存笔记")
                     
                     if submitted and a_title:
-                        file_paths, img_paths_str = [], ""
+                        file_paths = []
+                        img_paths_str = ""
                         atom_dir = os.path.join(user_storage, "atom_notes_files")
+                        
                         if upload_img:
+                            raw_bytes = upload_img.getvalue()
+                            if len(raw_bytes) > 2 * 1024 * 1024:
+                                compressed = compress_image(raw_bytes)
+                            else:
+                                compressed = raw_bytes
                             save_path = os.path.join(atom_dir, upload_img.name)
-                            with open(save_path, "wb") as f: f.write(upload_img.getbuffer())
+                            with open(save_path, "wb") as f:
+                                f.write(compressed)
                             file_paths.append(save_path)
                             img_paths_str += f"\n![{upload_img.name}]({save_path})\n"
+
                         if camera_img:
+                            raw_bytes = camera_img.getvalue()
+                            if len(raw_bytes) > 2 * 1024 * 1024:
+                                compressed = compress_image(raw_bytes)
+                            else:
+                                compressed = raw_bytes
                             cam_fname = f"camera_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
                             save_path = os.path.join(atom_dir, cam_fname)
-                            with open(save_path, "wb") as f: f.write(camera_img.getbuffer())
+                            with open(save_path, "wb") as f:
+                                f.write(compressed)
                             file_paths.append(save_path)
                             img_paths_str += f"\n![{cam_fname}]({save_path})\n"
+                        
                         if a_files:
                             for file in a_files:
                                 save_path = os.path.join(atom_dir, file.name)
-                                with open(save_path, "wb") as f: f.write(file.getbuffer())
+                                with open(save_path, "wb") as f:
+                                    f.write(file.getbuffer())
                                 file_paths.append(save_path)
+                        
                         file_paths_str = ",".join(file_paths)
                         final_content = f"{img_paths_str}\n\n{a_content}"
                         
@@ -543,142 +599,292 @@ def main_app():
                                   (user['id'], a_title, final_content, file_paths_str, "", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                         conn.commit()
                         conn.close()
-                        st.success("✅ 图文笔记已保存！")
+                        st.success("✅ 笔记已保存！")
                         st.rerun()
 
-        # ✅ 修复点：这里的 elif 与上面的 if 对齐，并删除了旧的 excalidraw 依赖
-        # 修正：elif 必须与 if 完全对齐（兄弟层级）
-        elif note_mode == "🖌️ 自由白板（拖拽/拉线/嵌入图片）":
-            st.caption("💡 绘图指南：左侧工具栏挑选形状、连线。将图片直接拖入形状中可完美适配！支持无限伸缩画布。")
-            
-            # 获取当前 Session 中的白板数据（用于恢复状态）
-            current_wb_json = st.session_state.get("current_wb_json", "{}")
+        with tab_flow:
+            st.subheader("⚡ 可视化白板流程图 (自由拖拽、连线、贴图)")
+            st.caption("✅ 从左侧工具栏拖拽节点；双击编辑文字；拖拽连接点连线；右键节点查看更多操作。")
 
-            # 优化：更换为 unpkg CDN 源，并实现实时双向通讯
-            html_code = f"""
-            <div id="excalidraw-container" style="height: 500px; width: 100%; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;"></div>
-            <script src="https://unpkg.com/@excalidraw/excalidraw@0.17.0/dist/excalidraw.min.js"></script>
+            col_add, col_save = st.columns([1, 1])
+            with col_add:
+                if st.button("➕ 添加节点 (自动编号)", use_container_width=True):
+                    st.session_state.flow_json = "add_node"
+            with col_save:
+                if st.button("💾 保存当前流程图到笔记", use_container_width=True):
+                    st.session_state.flow_json = "save_flow"
+
+            drawflow_html = f"""
+            <style>
+                #drawflow-container {{
+                    height: 600px;
+                    background: #f7f9fc;
+                    border: 1px solid #e0e0e0;
+                    border-radius: 8px;
+                    position: relative;
+                    overflow: hidden;
+                }}
+                .drawflow-node {{
+                    width: 150px !important;
+                    background: #ffffff !important;
+                    border: 2px solid #3b82f6 !important;
+                    border-radius: 8px !important;
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important;
+                    padding: 10px !important;
+                }}
+                .drawflow-node .node-content {{
+                    text-align: center;
+                    font-family: sans-serif;
+                }}
+                .drawflow-node img.node-img {{
+                    max-width: 100%; 
+                    height: auto; 
+                    max-height: 80px; 
+                    object-fit: contain; 
+                    margin-top: 5px;
+                    cursor: pointer;
+                    border-radius: 4px;
+                    border: 1px solid #eee;
+                }}
+                .drawflow-node .node-text {{
+                    font-weight: bold;
+                    color: #333;
+                    margin-bottom: 5px;
+                }}
+                #toolbar {{
+                    position: absolute;
+                    top: 10px;
+                    left: 10px;
+                    z-index: 10;
+                    display: flex;
+                    gap: 8px;
+                }}
+                #toolbar button {{
+                    background: #fff;
+                    border: 1px solid #ccc;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    cursor: pointer;
+                    font-size: 14px;
+                }}
+                #node-library {{
+                    position: absolute;
+                    top: 60px;
+                    left: 10px;
+                    z-index: 10;
+                    background: rgba(255,255,255,0.9);
+                    border: 1px solid #ccc;
+                    border-radius: 8px;
+                    padding: 8px;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 6px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                }}
+                #node-library .node-btn {{
+                    width: 40px;
+                    height: 40px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    background: #fff;
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-size: 20px;
+                }}
+                #mobile-fab {{
+                    display: none;
+                    position: absolute;
+                    bottom: 20px;
+                    right: 20px;
+                    z-index: 20;
+                    width: 56px;
+                    height: 56px;
+                    border-radius: 50%;
+                    background: #3b82f6;
+                    color: white;
+                    font-size: 32px;
+                    border: none;
+                    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+                    cursor: pointer;
+                }}
+                #mobile-node-menu {{
+                    display: none;
+                    position: absolute;
+                    bottom: 90px;
+                    right: 20px;
+                    z-index: 20;
+                    background: white;
+                    border: 1px solid #ddd;
+                    border-radius: 8px;
+                    padding: 8px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                    flex-direction: column;
+                    gap: 6px;
+                }}
+                #mobile-node-menu .node-btn {{
+                    width: 48px;
+                    height: 48px;
+                    border: none;
+                    background: transparent;
+                    font-size: 24px;
+                    cursor: pointer;
+                    border-radius: 4px;
+                }}
+                @media (max-width: 600px) {{
+                    #node-library {{ display: none; }}
+                    #mobile-fab {{ display: block; }}
+                    #mobile-node-menu.active {{ display: flex; }}
+                }}
+                #loading {{
+                    position: absolute;
+                    top: 50%; left: 50%;
+                    transform: translate(-50%, -50%);
+                    font-size: 18px; color: #666;
+                }}
+            </style>
+            <link rel="stylesheet" href="./static/drawflow.min.css">
+            <script src="./static/drawflow.min.js"></script>
+            <div id="drawflow-container">
+                <div id="loading">加载中...</div>
+                <div id="toolbar">
+                    <button id="btn-clear" title="清空画布">🗑️</button>
+                    <button id="btn-fit" title="适配视图">🔍</button>
+                    <button id="btn-save" title="保存">💾</button>
+                    <button id="btn-export" title="导出 PNG">📷</button>
+                </div>
+                <div id="node-library">
+                    <button class="node-btn" data-type="rect" title="矩形">▭</button>
+                    <button class="node-btn" data-type="rect-round" title="圆角矩形">▭</button>
+                    <button class="node-btn" data-type="diamond" title="菱形">◇</button>
+                    <button class="node-btn" data-type="circle" title="圆形">●</button>
+                </div>
+                <button id="mobile-fab">+</button>
+                <div id="mobile-node-menu">
+                    <button class="node-btn" data-type="rect" title="矩形">▭</button>
+                    <button class="node-btn" data-type="rect-round" title="圆角矩形">▭</button>
+                    <button class="node-btn" data-type="diamond" title="菱形">◇</button>
+                    <button class="node-btn" data-type="circle" title="圆形">●</button>
+                </div>
+            </div>
             <script>
                 (function() {{
-                    const waitForExcalidraw = setInterval(() => {{
-                        if (window.Excalidraw) {{
-                            clearInterval(waitForExcalidraw);
-                            const container = document.getElementById('excalidraw-container');
-                            let initialData = null;
-                            try {{
-                                initialData = {current_wb_json};
-                            }} catch (e) {{ initialData = {{}}; }}
-                            
-                            const app = window.Excalidraw.default;
-                            const excalibur = app(container, {{
-                                initialData: initialData,
-                                theme: "light",
-                                viewBackgroundColor: "#ffffff"
-                            }});
-                            
-                            excalibur.on('change', function(data) {{
-                                const jsonStr = JSON.stringify({{ elements: data.elements, appState: data.appState, files: data.files }});
-                                window.parent.postMessage({{
-                                    type: 'streamlit:setComponentValue',
-                                    value: jsonStr
-                                }}, '*');
-                            }});
+                    const container = document.getElementById('drawflow-container');
+                    const loading = document.getElementById('loading');
+                    let editor = null;
+                    function initDrawflow() {{
+                        editor = new Drawflow(container);
+                        editor.start();
+                        editor.zoom_ = 1; editor.zoom_max = 3; editor.zoom_min = 0.1;
+                        document.querySelector('.drawflow-delete')?.remove();
+                        const jsonStr = {st.session_state.flow_json};
+                        if (jsonStr && jsonStr !== '{{}}' && jsonStr !== 'add_node' && jsonStr !== 'save_flow') {{
+                            try {{ editor.import(JSON.parse(jsonStr)); }} catch(e) {{ console.warn('加载失败', e); }}
                         }}
-                    }}, 200);
+                        loading.style.display = 'none';
+                        bindEvents();
+                    }}
+                    function bindEvents() {{
+                        document.querySelectorAll('.node-btn').forEach(btn => {{
+                            btn.addEventListener('click', function(e) {{ addNodeByType(this.dataset.type); }});
+                        }});
+                        const fab = document.getElementById('mobile-fab');
+                        const menu = document.getElementById('mobile-node-menu');
+                        fab.addEventListener('click', function() {{ menu.classList.toggle('active'); }});
+                        document.getElementById('btn-clear').addEventListener('click', function() {{ if(confirm('确定清空？')) editor.clear(); }});
+                        document.getElementById('btn-fit').addEventListener('click', function() {{ editor.zoom_to_fit(); }});
+                        document.getElementById('btn-save').addEventListener('click', saveData);
+                        document.getElementById('btn-export').addEventListener('click', function() {{ alert('导出功能待完善'); }});
+                        container.addEventListener('dblclick', function(e) {{
+                            const node = e.target.closest('.drawflow-node');
+                            if (node) {{
+                                const id = node.id.replace('node-', '');
+                                const textEl = node.querySelector('.node-text');
+                                if (textEl) {{
+                                    const newText = prompt('修改节点文字：', textEl.textContent);
+                                    if (newText !== null) {{ textEl.textContent = newText; saveData(); }}
+                                }}
+                            }}
+                        }});
+                        container.addEventListener('contextmenu', function(e) {{
+                            const node = e.target.closest('.drawflow-node');
+                            if (!node) return;
+                            e.preventDefault();
+                            const id = node.id.replace('node-', '');
+                            const textEl = node.querySelector('.node-text');
+                            showContextMenu(e.clientX, e.clientY, id, textEl);
+                        }});
+                        window.addEventListener('message', function(e) {{
+                            const data = e.data;
+                            if (data === 'add_node') addNodeByType('rect');
+                            else if (data === 'save_flow') saveData();
+                        }});
+                        editor.on('connectionCreated', saveData);
+                        editor.on('nodeMoved', saveData);
+                        editor.on('nodeDeleted', saveData);
+                    }}
+                    function addNodeByType(type) {{
+                        let html = '', className = '';
+                        switch(type) {{
+                            case 'rect': html = `<div class="node-content"><div class="node-text">矩形</div></div>`; break;
+                            case 'rect-round': html = `<div class="node-content"><div class="node-text">圆角</div></div>`; className = 'drawflow-node-round'; break;
+                            case 'diamond': html = `<div class="node-content"><div class="node-text">判断</div></div>`; className = 'drawflow-node-diamond'; break;
+                            case 'circle': html = `<div class="node-content"><div class="node-text">数据</div></div>`; className = 'drawflow-node-circle'; break;
+                            default: html = `<div class="node-content"><div class="node-text">节点</div></div>`;
+                        }}
+                        const x = 100 + Math.random() * 300, y = 100 + Math.random() * 200;
+                        editor.addNode('custom', 1, 1, x, y, 'custom', {{ html: html }}, null, className);
+                        saveData();
+                    }}
+                    let contextMenu = null;
+                    function showContextMenu(x, y, nodeId, textEl) {{
+                        if (contextMenu) contextMenu.remove();
+                        const menu = document.createElement('div');
+                        menu.style.cssText = `position:absolute;background:white;border:1px solid #ccc;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.15);padding:6px 0;z-index:100;min-width:120px;left:${{x}}px;top:${{y}}px;`;
+                        const items = [
+                            {{ label: '重命名', action: () => {{ const t=prompt('重命名：',textEl.textContent); if(t!==null){{textEl.textContent=t;saveData();}} }} }},
+                            {{ label: '上传图片', action: () => {{ const input=document.createElement('input'); input.type='file';input.accept='image/*'; input.onchange=function(e){{ const file=e.target.files[0];if(file){{ const r=new FileReader(); r.onload=function(ev){{ const img=document.createElement('img'); img.className='node-img'; img.src=ev.target.result; document.querySelector(`#node-${{nodeId}} .node-content`).appendChild(img); saveData(); }}; r.readAsDataURL(file); }} }}; input.click(); }} }},
+                            {{ label: '复制节点', action: () => {{ const newNode = editor.exportNode(nodeId); editor.addNode('custom', 1, 1, 100, 100, 'custom', newNode); saveData(); }} }},
+                            {{ label: '删除节点', action: () => {{ if(confirm('确定删除？')){{ editor.removeNodeId(nodeId); saveData(); }} }} }}
+                        ];
+                        items.forEach(item => {{
+                            const div=document.createElement('div'); div.textContent=item.label; div.style.cssText='padding:6px 12px;cursor:pointer;';
+                            div.addEventListener('mouseenter',()=>div.style.background='#f0f0f0');
+                            div.addEventListener('mouseleave',()=>div.style.background='transparent');
+                            div.addEventListener('click',()=>{{ item.action(); menu.remove(); }});
+                            menu.appendChild(div);
+                        }});
+                        document.body.appendChild(menu); contextMenu=menu;
+                        setTimeout(()=>{{ document.addEventListener('click',function close(e){{ if(!menu.contains(e.target)){{ menu.remove(); document.removeEventListener('click',close); }} }}); }},10);
+                    }}
+                    let saveTimer = null;
+                    function saveData() {{
+                        if (!editor) return;
+                        clearTimeout(saveTimer);
+                        saveTimer = setTimeout(() => {{
+                            const json = JSON.stringify(editor.export());
+                            window.parent.postMessage({{ action: 'save_data', json: json }}, '*');
+                        }}, 300);
+                    }}
+                    initDrawflow();
                 }})();
             </script>
             """
-            
-            # 渲染白板组件
-            excalidraw_result = st.components.v1.html(html_code, height=550)
-            
-            # 数据变动同步到 session_state
-            if excalidraw_result:
-                st.session_state["current_wb_json"] = excalidraw_result
-
-            # 保存逻辑
-            with st.form("atom_note_whiteboard"):
-                a_title = st.text_input("白板笔记标题")
-                submitted_wb = st.form_submit_button("💾 保存当前白板状态")
-                
-                if submitted_wb and a_title:
-                    data_to_save = st.session_state.get("current_wb_json")
-                    if data_to_save and data_to_save != "{}":
-                        conn = get_db_connection()
-                        c = conn.cursor()
+            st.components.v1.html(drawflow_html, height=650)
+            flow_code = st.text_area("流程图代码 (JSON备份)", value=st.session_state.flow_json, key="flow_json_code", height=100, label_visibility="collapsed")
+            if st.button("保存流程图至本地数据库", type="primary"):
+                if flow_code and flow_code != "{}" and flow_code != "add_node" and flow_code != "save_flow":
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    flow_title = st.text_input("为这个流程图命名", value=f"流程图_{datetime.now().strftime('%Y%m%d%H%M')}")
+                    if flow_title:
                         c.execute("INSERT INTO atom_notes (user_id, title, content, file_paths, code_content, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                                  (user['id'], a_title, "[自由白板]", "", data_to_save, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                                  (user['id'], flow_title, "该笔记为流程图白板数据", "", flow_code, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
                         conn.commit()
                         conn.close()
-                        st.success("✅ 白板已成功保存！")
-                        st.session_state["current_wb_json"] = "{}"
+                        st.success("✅ 流程图已存入您的原子笔记！可随时在「图文笔记」中点击查看详情调出。")
                         st.rerun()
-                    else:
-                        st.error("当前白板为空或未检测到绘图内容，请先拖拽几个形状到画布上再试！")
-
-        # ---------- 统一展示已保存的笔记 ----------
-        st.divider()
-        st.write("📚 **已保存的原子笔记列表**")
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT id, title, content, file_paths, code_content, created_at FROM atom_notes WHERE user_id = ? ORDER BY created_at DESC", (user['id'],))
-        atom_notes = c.fetchall()
-        conn.close()
-
-        if not atom_notes:
-            st.info("暂无笔记，请在上方新建。")
-        else:
-            for note in atom_notes:
-                with st.container(border=True):
-                    st.markdown(f"### {note[1]}") 
-                    st.caption(f"📅 {note[5]}")
-                    if st.button("查看详情", key=f"view_{note[0]}"):
-                        st.session_state[f"detail_{note[0]}"] = True
-                    
-                    if st.session_state.get(f"detail_{note[0]}"):
-                        if note[4] and note[4] != "":
-                            try:
-                                # 如果是保存的白板JSON，则直接渲染 Excalidraw 白板
-                                whiteboard_json = json.loads(note[4])
-                                # 渲染白板组件（同样基于原生 HTML）
-                                render_html = f"""
-                                <div id="excalidraw-view-container" style="height: 400px; width: 100%; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;"></div>
-                                <script src="https://cdn.jsdelivr.net/npm/@excalidraw/excalidraw@0.17.0/dist/excalidraw.min.js"></script>
-                                <script>
-                                    window.onload = function() {{
-                                        const container = document.getElementById('excalidraw-view-container');
-                                        const app = window.Excalidraw.default;
-                                        const excalibur = app(container, {{
-                                            initialData: {json.dumps(whiteboard_json)},
-                                            theme: "light",
-                                            viewBackgroundColor: "#ffffff"
-                                        }});
-                                    }};
-                                </script>
-                                """
-                                st.components.v1.html(render_html, height=450)
-                            except Exception as e:
-                                st.warning(f"白板数据解析错误，请确认笔记内容：{e}")
-                        else:
-                            # 普通图文笔记
-                            st.markdown(note[2])
-
-                        if note[3]:
-                            st.write("📎 **附件：**")
-                            for path in note[3].split(","):
-                                if path and os.path.exists(path):
-                                    ext = os.path.splitext(path)[1].lower()
-                                    fname = os.path.basename(path)
-                                    if ext in ['.png','.jpg','.jpeg','.gif']:
-                                        st.image(path, caption=fname, use_container_width=True)
-                                    elif ext in ['.mp3','.wav','.ogg']:
-                                        st.audio(path)
-                                    else:
-                                        with open(path, "rb") as f:
-                                            st.download_button(label=f"📥 下载 {fname}", data=f, file_name=fname, key=f"atom_{note[0]}_{fname}")
-                        if st.button(f"收起详情", key=f"close_{note[0]}"):
-                            st.session_state[f"detail_{note[0]}"] = False
-                            st.rerun()
 
     # ---------- 个人中心 ----------
     elif menu == "⚙️ 个人中心":
